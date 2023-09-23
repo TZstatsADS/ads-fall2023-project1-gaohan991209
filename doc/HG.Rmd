@@ -17,10 +17,232 @@ library(ggraph)
 library(rsconnect)
 library(ggplot2)
 ```
+# Introduction to the project
 
-```{r}
+From psychology's perspective, happiness leads to individuals' well-being, both physically and mentally; how happy we feel every day is the key to reduce chance of anxiety and psychological disorders. However, a lot of the times "the pursuit of happiness" is confusing: how exactly we should do in life to make our hearts feel happy? Is there a guidebook to help us make decisions?
+
+Looking at people around me, especially considering my cultural background, marriage is a topic that is inevitable starting from age 25. My parents get curious about my future plan on marriage and how my relationship status goes. Their opinion, which I believe also resonates with lots of people, is that everyone will eventually get married and build a family. Just like people need water, air, and food to survive, getting into a marriage seems like a solid fact. 
+
+But I doubt it. I wonder if it is a necessity. 
+
+They mention a lot about marriage, but one topic is missing-- if marriage brings happiness. Is life after getting married better or worse? If choosing to build a connection with partner for the rest of life, is that a choice that necessarily bring happiness?
+
+Those questions and concerns lead me to this project. 
+
+# Dataset- HappyDB
+
+HappyDB is a corpus of more than 100,000 crowd-sourced happy moments on Amazon Mechanical Turk (MTurk.) For every task, it is asked that the MTurk workers describe 3 happy moments in the past 24 hours (or past 3 months.). The goal of the corpus is to advance the state of the art of understanding the causes of happiness that can be gleaned from text. There are 10,843 distinct users, 38,188 distinct words, and a total of 100,922 happy moments collected. 
+
+## Cleaning the dataset (from text_processing,rmd)
+
+We clean the text by converting all the letters to the lower case, and removing punctuation, numbers, empty words and extra white space. Stemming reduces a word to its word *stem*. We stem the words here and then convert the "tm" object to a "tidy" object for much faster processing. We also make a dictionary to look up the words corresponding to the stems. After removing stopwords provided by the "tidytext" package and also adding custom stopwords in context of our data, we combine the stems and the dictionary into the same "tidy" object. Lastly, we complete the stems by picking the corresponding word with the highest frequency. We want our processed words to resemble the structure of the original happy moments. So we paste the words together to form happy moments.
+
+The final processed data is stored as hm_data and ready to be used for any kind of analysis.
+
+```{r, echo=FALSE}
 urlfile<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/cleaned_hm.csv'
 hm_data <- read_csv(urlfile)
 summary(hm_data)
 ```
+```{r text processing in tm,warning=FALSE, message=FALSE,echo=FALSE}
+corpus <- VCorpus(VectorSource(hm_data$cleaned_hm))%>%
+  tm_map(content_transformer(tolower))%>%
+  tm_map(removePunctuation)%>%
+  tm_map(removeNumbers)%>%
+  tm_map(removeWords, character(0))%>%
+  tm_map(stripWhitespace)
+```
+
+```{r stemming,warning=FALSE, message=FALSE,echo=FALSE}
+stemmed <- tm_map(corpus, stemDocument) %>%
+  tidy() %>%
+  select(text)
+```
+
+
+```{r tidy dictionary,warning=FALSE, message=FALSE,echo=FALSE}
+dict <- tidy(corpus) %>%
+  select(text) %>%
+  unnest_tokens(dictionary, text)
+```
+
+```{r stopwords,warning=FALSE, message=FALSE,echo=FALSE}
+data("stop_words")
+
+word <- c("happy","ago","yesterday","lot","today","months","month",
+                 "happier","happiest","last","week","past","day","time")
+
+stop_words <- stop_words %>%
+  bind_rows(mutate(tibble(word), lexicon = "updated"))
+```
+
+```{r tidy stems with dictionary,warning=FALSE, message=FALSE,echo=FALSE}
+completed <- stemmed %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(stems, text) %>%
+  bind_cols(dict) %>%
+  anti_join(stop_words, by = c("dictionary" = "word"))
+```
+
+```{r stem completion, warning=FALSE, message=FALSE,echo=FALSE}
+completed <- completed %>%
+  group_by(stems) %>%
+  count(dictionary) %>%
+  mutate(word = dictionary[which.max(n)]) %>%
+  ungroup() %>%
+  select(stems, word) %>%
+  distinct() %>%
+  right_join(completed) %>%
+  select(-stems)
+```
+
+```{r reverse unnest,warning=FALSE, message=FALSE,echo=FALSE}
+completed <- completed %>%
+  group_by(id) %>%
+  summarise(text = str_c(word, collapse = " ")) %>%
+  ungroup()
+```
+
+```{r cleaned hm_data, warning=FALSE, message=FALSE,echo=FALSE}
+hm_data <- hm_data %>%
+  mutate(id = row_number()) %>%
+  inner_join(completed)
+```
+
+```{r export data,echo=FALSE}
+write_csv(hm_data, "../output/processed_moments.csv")  
+```
+
+```{r, echo=FALSE}
+urlfile1<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/demographic.csv'
+demo_data <- read_csv(urlfile1)
+head(demo_data)
+```
+
+```{r}
+hm_data <- hm_data %>%
+  inner_join(demo_data, by = "wid") %>%
+  select(wid,
+         original_hm,
+         gender, 
+         marital, 
+         parenthood,
+         reflection_period,
+         age, 
+         country, 
+         ground_truth_category, 
+         predicted_category,
+         text) %>%
+  mutate(count = sapply(hm_data$text, wordcount)) %>%
+  filter(marital %in% c("single", "married","divorced","separated","widowed")) %>%
+  filter(gender %in% c("m", "f")) %>%
+  filter(parenthood %in% c("n", "y")) %>%
+  filter(reflection_period %in% c("24h", "3m")) %>%
+  mutate(reflection_period = fct_recode(reflection_period, 
+                                        months_3 = "3m", hours_24 = "24h"))
+head(hm_data)
+```
+
+# Overall wordcloud
+```{r, warning=FALSE}
+wordcloud(words = hm_data$text, min.freq = 1, max.words=200, 
+          random.order=FALSE, rot.per=0.35, colors=brewer.pal(8, "Dark2"))
+```
+
+# Analysis
+
+What are the most happy moments for single and married people? I start with dividing them into two groups based on if they are in a marriage at the moment. In this case, divorced and widowed are considered single because is currently not in a marriage; separated in still married because in an active marital status.
+
+```{r, warning=FALSE}
+table(hm_data$marital)
+hm_data_married <- hm_data[hm_data$marital== c("married", "separated"),]
+hm_data_single <- hm_data[hm_data$marital== c("divorced", "single", "widowed"),]
+```
+
+```{r, warning=FALSE}
+bag_of_words_single <-  hm_data_single %>%
+  unnest_tokens(word, text)
+
+word_count_single <- bag_of_words_single %>%
+  count(word, sort = TRUE)
+
+temp <- bag_of_words_single %>%
+      count(gender, word) %>%
+      group_by(gender) %>%
+      mutate(proportion = n / sum(n)) %>% 
+      select(-n) %>% 
+      spread(gender, proportion)
+ggplot(temp, aes_string(x = colnames(temp)[2], y = colnames(temp)[3]),
+             color = abs(colnames(temp)[3] - colnames(temp)[2])) +
+      geom_abline(color = "blue", lty = 2) +
+      geom_jitter(alpha = 0.1, size = 1, width = 0.3, height = 0.3) +
+  labs(title="Words Proportion for single people male/female")+
+      geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+      scale_x_log10(labels = percent_format()) +
+      scale_y_log10(labels = percent_format()) +
+      scale_color_gradient(limits = c(0, 0.001), low = "black", high = "gray")
+```
+```{r, warning=FALSE}
+bag_of_words_married <-  hm_data_married %>%
+  unnest_tokens(word, text)
+
+word_count_married <- bag_of_words_married %>%
+  count(word, sort = TRUE)
+
+temp <- bag_of_words_married %>%
+      count(gender, word) %>%
+      group_by(gender) %>%
+      mutate(proportion = n / sum(n)) %>% 
+      select(-n) %>% 
+      spread(gender, proportion)
+ggplot(temp, aes_string(x = colnames(temp)[2], y = colnames(temp)[3]),
+             color = abs(colnames(temp)[3] - colnames(temp)[2])) +
+      geom_abline(color = "blue", lty = 2) +
+      geom_jitter(alpha = 0.1, size = 1, width = 0.3, height = 0.3) +
+  labs(title="Words Proportion for married people male/female")+
+      geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+      scale_x_log10(labels = percent_format()) +
+      scale_y_log10(labels = percent_format()) +
+      scale_color_gradient(limits = c(0, 0.001), low = "black", high = "gray")
+```
+Based on the two plots above, 'girlfriend'/'boyfriend' and 'wife'/'husband' appear a lot in happy moments. Besides partners, 'friend' and 'birthday' are the two texts that appear the most. 
+
+Now looking into the wordcloud, which gives the word frequency of single and married people's happy moments:
+```{r}
+bag_of_words_single <-  hm_data_single %>%
+  unnest_tokens(word, text)
+
+word_count_single <- bag_of_words_single %>%
+  count(word, sort = TRUE)
+
+wordcloud(word_count_single$word,word_count_single$n ,
+          scale=c(3,0.1),
+          max.words=80,
+          min.freq=2,
+          random.order=FALSE,
+          rot.per=0.4,
+          use.r.layout=T,
+          colors=brewer.pal(9,"Greens"))
+```
+```{r}
+bag_of_words_married <-  hm_data_married %>%
+  unnest_tokens(word, text)
+
+word_count_married <- bag_of_words_married %>%
+  count(word, sort = TRUE)
+
+wordcloud(word_count_married$word,word_count_married$n ,
+          scale=c(3,0.1),
+          max.words=80,
+          min.freq=2,
+          random.order=FALSE,
+          rot.per=0.4,
+          use.r.layout=T,
+          colors=brewer.pal(9,"Blues"))
+```
+Similar results are given. Friend is the predominant happiness source for both single and married people, while married people have husband/wife/family/home/daughter/son more, almost as much as friend. So, it can be seen that once you get married, most of your life will be around your family and your happy moments will be from family members.
+
+# Conclusion
+
+After getting married, although friend is still a huge part to bring happiness, your happy moments mainly come from family. Husband/wife bring lots of happy moments while there are less stuff out of family that bring you joy. Maybe that's because after getting married most of your time will be spent at home with family members. So I guess it's a personal choice that if you want family to be your source of happiness then marriage is a good option. 
 
